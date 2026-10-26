@@ -4,16 +4,48 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useLanguage } from '@/lib/LanguageContext'
 import { FileText, Upload, Loader2, CheckCircle, Trash2, X, AlertCircle, Clock, Image } from 'lucide-react'
 import { format } from 'date-fns'
+import PrescriptionReminderReview from '@/components/PrescriptionReminderReview'
+import { normalizeMedicine } from '@/lib/prescriptionReminders'
+import { describeSupabaseError } from '@/lib/appointments'
 
-const STAGES = ['upload', 'quality_check', 'ocr', 'ai_analysis', 'reminders', 'completed']
+// Extracted medicines live in public.prescription_medicines; older rows may carry a `medicines` JSON array.
+function usePrescriptionMedicines(prescription) {
+  return useQuery({
+    queryKey: ['prescription-medicines', prescription.id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('prescription_medicines')
+        .select('*')
+        .eq('prescription_id', prescription.id)
+        .order('created_at')
+      if (error) throw error
+      const rows = data?.length ? data : (Array.isArray(prescription.medicines) ? prescription.medicines : [])
+      return rows.map(normalizeMedicine).filter(m => m.name)
+    },
+    // Keep checking while analysis is still running so new medicines appear without reopening.
+    refetchInterval: prescription.status !== 'completed' && prescription.status !== 'failed' ? 3000 : false,
+  })
+}
+
+// Must match the prescription_stage enum in the database. Reminders are created by the user after review.
+const STAGES = ['upload', 'quality_check', 'ocr', 'ai_analysis', 'medicine_extraction', 'completed']
 
 const STAGE_LABELS = {
   upload: 'Uploaded',
   quality_check: 'Quality Check',
   ocr: 'Reading Text',
   ai_analysis: 'AI Analysis',
-  reminders: 'Creating Reminders',
+  medicine_extraction: 'Extracting Medicines',
   completed: 'Completed',
+}
+
+// supabase.functions.invoke only says "non-2xx status code"; read the function's own message instead.
+async function functionErrorMessage(error) {
+  try {
+    const body = await error?.context?.json?.()
+    if (body?.message) return body.message
+  } catch { /* fall through */ }
+  return error?.message ?? 'Prescription analysis failed.'
 }
 
 function ProgressBar({ stage, status }) {
@@ -78,6 +110,10 @@ function ImagePreview({ storagePath }) {
 }
 
 function DetailModal({ prescription, onClose, onDelete }) {
+  const { data: loadedMedicines = [], isLoading: medicinesLoading, error: medicinesError } = usePrescriptionMedicines(prescription)
+  // Only completed analyses are trusted; never offer reminders from a failed or in-progress run.
+  const medicines = prescription.status === 'completed' ? loadedMedicines : []
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
       <div className="bg-card rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
@@ -127,13 +163,24 @@ function DetailModal({ prescription, onClose, onDelete }) {
             </div>
           )}
 
-          {prescription.medicines && prescription.medicines.length > 0 && (
+          {medicinesLoading && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading extracted medicines…</div>
+          )}
+
+          {medicinesError && (
+            <div role="alert" className="flex items-start gap-2 p-3 bg-red-50 rounded-xl text-xs text-red-600">
+              <AlertCircle size={14} className="shrink-0 mt-0.5" />
+              <p>{describeSupabaseError(medicinesError, 'load the extracted medicines')}</p>
+            </div>
+          )}
+
+          {medicines.length > 0 && (
             <div>
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Medicines</p>
               <div className="space-y-2">
-                {prescription.medicines.map((m, i) => (
-                  <div key={i} className="bg-muted/50 rounded-xl p-3">
-                    <p className="font-medium text-sm">{m.name}</p>
+                {medicines.map(m => (
+                  <div key={m.key} className="bg-muted/50 rounded-xl p-3">
+                    <p className="font-medium text-sm">{m.name}{m.strength && <span className="text-muted-foreground font-normal"> · {m.strength}</span>}</p>
                     {m.dosage && <p className="text-xs text-muted-foreground">Dosage: {m.dosage}</p>}
                     {m.frequency && <p className="text-xs text-muted-foreground">Frequency: {m.frequency}</p>}
                     {m.duration && <p className="text-xs text-muted-foreground">Duration: {m.duration}</p>}
@@ -142,6 +189,14 @@ function DetailModal({ prescription, onClose, onDelete }) {
                 ))}
               </div>
             </div>
+          )}
+
+          {medicines.length > 0 && (
+            <PrescriptionReminderReview medicines={medicines} sourceLabel={prescription.original_filename} />
+          )}
+
+          {!medicinesLoading && !medicinesError && medicines.length === 0 && prescription.status === 'completed' && (
+            <p className="text-xs text-muted-foreground">No medicines were extracted from this prescription, so no reminders can be suggested. You can still add reminders manually on the Reminders page.</p>
           )}
 
           {prescription.food_reminders && prescription.food_reminders.length > 0 && (
@@ -262,17 +317,22 @@ export default function Prescriptions() {
 
       const { data: { session } } = await supabase.auth.getSession()
 
-      const { error: functionError } = await supabase.functions.invoke('analyze-prescription', {
+      const { data: result, error: functionError } = await supabase.functions.invoke('analyze-prescription', {
         body: { prescriptionId: prescription.id },
         headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {},
       })
 
-      if (functionError) throw functionError
-
       const { data: refreshed } = await refetch()
       setSelected(refreshed?.find(p => p.id === prescription.id) ?? prescription)
+      qc.invalidateQueries({ queryKey: ['prescription-medicines', prescription.id] })
 
-      showToast('Prescription uploaded', 'Analysis has started. This may take a few moments.')
+      if (functionError) {
+        // The file is saved; only the analysis failed. Keep the record so the user can see its status.
+        showToast('Analysis failed', await functionErrorMessage(functionError), 'destructive')
+        return
+      }
+
+      showToast('Prescription analysed', result?.message ?? 'Review the extracted medicines before creating reminders.')
     } catch (err) {
       showToast('Upload failed', err.message ?? 'Unable to upload prescription.', 'destructive')
     } finally {
@@ -316,7 +376,7 @@ export default function Prescriptions() {
         {uploading ? (
           <div className="flex flex-col items-center gap-3">
             <Loader2 size={36} className="animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Uploading prescription...</p>
+            <p className="text-sm text-muted-foreground">Uploading and analysing prescription… this can take up to a minute.</p>
           </div>
         ) : (
           <div className="flex flex-col items-center">

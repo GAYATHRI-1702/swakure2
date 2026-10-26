@@ -1,5 +1,6 @@
-import React, { useState } from 'react'
-import { Pill, Search, Loader2 } from 'lucide-react'
+import React, { useState, useRef } from 'react'
+import { Pill, Search } from 'lucide-react'
+import { matchMedicines, resolveMedicineName } from '@/lib/medicineSearch'
 
 const COMMON = ['Paracetamol', 'Ibuprofen', 'Metformin', 'Amlodipine', 'Atorvastatin', 'Omeprazole', 'Cetirizine', 'Azithromycin']
 
@@ -14,12 +15,46 @@ const INFO = {
   Azithromycin: { uses: 'Bacterial infections', dosage: '500mg day 1, then 250mg days 2-5', sideEffects: 'Nausea, diarrhea', warnings: 'Complete full course' },
 }
 
+const MEDICINE_NAMES = Object.keys(INFO)
+
 export default function Medicines() {
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState(null)
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(-1)
+  const inputRef = useRef(null)
 
-  const handleSearch = (name) => {
+  const suggestions = matchMedicines(MEDICINE_NAMES, search)
+  const showList = open && search.trim().length > 0
+
+  const handleSearch = (typed) => {
+    // Match the dataset case-insensitively so "metformin" opens the Metformin entry.
+    const name = resolveMedicineName(MEDICINE_NAMES, typed) ?? typed.trim()
     setSelected(INFO[name] ? { name, ...INFO[name] } : { name, uses: 'Information not available in offline mode.', dosage: '-', sideEffects: '-', warnings: 'Consult your doctor or pharmacist.' })
+    setOpen(false)
+    setActive(-1)
+  }
+
+  const choose = (name) => {
+    setSearch(name)
+    handleSearch(name)
+  }
+
+  const onKeyDown = (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setOpen(true)
+      if (suggestions.length) setActive(i => (i + 1) % suggestions.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (suggestions.length) setActive(i => (i <= 0 ? suggestions.length - 1 : i - 1))
+    } else if (e.key === 'Enter') {
+      if (showList && active >= 0 && suggestions[active]) choose(suggestions[active])
+      else if (search.trim()) handleSearch(search)
+    } else if (e.key === 'Escape') {
+      setOpen(false)
+      setActive(-1)
+    }
   }
 
   return (
@@ -30,21 +65,53 @@ export default function Medicines() {
       </div>
 
       <div className="flex gap-2">
-        <input
-          placeholder="Search medicine name..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && search && handleSearch(search)}
-          className="flex-1 border border-border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-        />
-        <button onClick={() => search && handleSearch(search)} className="bg-primary text-white px-4 py-2.5 rounded-xl">
+        <div className="relative flex-1">
+          <input
+            ref={inputRef}
+            role="combobox"
+            aria-expanded={showList}
+            aria-controls="medicine-suggestions"
+            aria-autocomplete="list"
+            aria-activedescendant={showList && active >= 0 ? `medicine-option-${active}` : undefined}
+            placeholder="Search medicine name..."
+            value={search}
+            onChange={e => { setSearch(e.target.value); setOpen(true); setActive(-1) }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setOpen(false)}
+            onKeyDown={onKeyDown}
+            className="w-full border border-border rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+          />
+          {showList && (
+            <ul id="medicine-suggestions" role="listbox" className="absolute z-20 left-0 right-0 mt-1 bg-card border border-border rounded-xl shadow-lg overflow-hidden">
+              {suggestions.length === 0 ? (
+                <li className="px-4 py-2.5 text-sm text-muted-foreground">No matching medicines. Press Enter to search anyway.</li>
+              ) : suggestions.map((name, i) => (
+                <li
+                  key={name}
+                  id={`medicine-option-${i}`}
+                  role="option"
+                  aria-selected={i === active}
+                  // mousedown (not click) so the choice registers before the input blurs
+                  onMouseDown={e => { e.preventDefault(); choose(name) }}
+                  onMouseEnter={() => setActive(i)}
+                  className={`px-4 py-2.5 text-sm cursor-pointer flex items-center gap-2 ${i === active ? 'bg-muted' : ''}`}
+                >
+                  <Pill size={14} className="text-primary shrink-0" />
+                  <span>{name}</span>
+                  <span className="text-xs text-muted-foreground truncate">· {INFO[name].uses}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <button onClick={() => search.trim() && handleSearch(search)} aria-label="Search" className="bg-primary text-white px-4 py-2.5 rounded-xl">
           <Search size={18} />
         </button>
       </div>
 
       <div className="flex flex-wrap gap-2">
         {COMMON.map(m => (
-          <button key={m} onClick={() => { setSearch(m); handleSearch(m) }} className="text-xs border border-border rounded-full px-3 py-1.5 hover:bg-muted transition-colors">
+          <button key={m} onClick={() => choose(m)} className="text-xs border border-border rounded-full px-3 py-1.5 hover:bg-muted transition-colors">
             {m}
           </button>
         ))}

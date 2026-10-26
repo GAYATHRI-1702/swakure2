@@ -96,6 +96,7 @@ export default function Reminders() {
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm">{r.title}</p>
                 <p className="text-xs text-muted-foreground">{r.time} · {r.frequency} · {r.reminder_type}</p>
+                {r.description && <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2 break-words" title={r.description}>{r.description}</p>}
               </div>
               <button onClick={() => toggle({ id: r.id, is_active: r.is_active })} className="text-primary">
                 {r.is_active ? <ToggleRight size={24} /> : <ToggleLeft size={24} className="text-muted-foreground" />}
